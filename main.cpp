@@ -1,6 +1,7 @@
 #include <random>
 #include <vector>
 #include <string>
+#include <array>
 
 #define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 
@@ -27,9 +28,16 @@ static const float c_goldenRatioConjugate = 0.61803398875f;
 static const float c_root2 = 1.41421356237f;
 static const float c_fractRoot2 = 0.41421356237f;
 
+// generalized golden ratio, from:
+// http://extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences/
+const float c_R2_g = 1.32471795724474602596f;
+const float c_R2_a1 = 1.0f / c_R2_g;
+const float c_R2_a2 = 1.0f / (c_R2_g * c_R2_g);
+
 // ===================================== Utils =====================================
 
 typedef std::vector<std::vector<std::string>> CSV;
+typedef std::array<float, 2> Vec2;
 
 void SetCSV(CSV& csv, size_t x, size_t y, const char* text)
 {
@@ -76,6 +84,52 @@ int FloatToItem(float f, int numItems)
 float Lerp(float a, float b, float t)
 {
     return a * (1.0f - t) + b * t;
+}
+
+// ===================================== LDSs =====================================
+
+static size_t Ruler(size_t n)
+{
+    size_t ret = 0;
+    while (n != 0 && (n & 1) == 0)
+    {
+        n /= 2;
+        ++ret;
+    }
+    return ret;
+}
+
+void Sobol(std::vector<Vec2>& values, size_t numValues)
+{
+    // x axis
+    values.resize(numValues);
+    size_t sampleInt = 0;
+    for (size_t i = 0; i < numValues; ++i)
+    {
+        size_t ruler = Ruler(i + 1);
+        size_t direction = size_t(size_t(1) << size_t(31 - ruler));
+        sampleInt = sampleInt ^ direction;
+        values[i][0] = float(sampleInt) / std::pow(2.0f, 32.0f);
+    }
+
+    // y axis
+    // Code adapted from http://web.maths.unsw.edu.au/~fkuo/sobol/
+    // uses numbers: new-joe-kuo-6.21201
+
+    // Direction numbers
+    std::vector<size_t> V;
+    V.resize((size_t)ceil(log((double)numValues + 1) / log(2.0)));  //+1 because we are skipping index 0
+    V[0] = size_t(1) << size_t(31);
+    for (size_t i = 1; i < V.size(); ++i)
+        V[i] = V[i - 1] ^ (V[i - 1] >> 1);
+
+    // Samples
+    sampleInt = 0;
+    for (size_t i = 0; i < numValues; ++i) {
+        size_t ruler = Ruler(i + 1);
+        sampleInt = sampleInt ^ V[ruler];
+        values[i][1] = float(sampleInt) / std::pow(2.0f, 32.0f);
+    }
 }
 
 // ===================================== PDFs =====================================
@@ -165,6 +219,139 @@ namespace PDF
         size_t m_attempts = 0;
         float m_value;
     };
+
+    // PDF: y = 1
+    struct UniformLDS_R2_x
+    {
+        UniformLDS_R2_x()
+        {
+            #if RANDOMIZE_LDS_START()
+            std::mt19937 rng = GetRNG();
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            m_value = dist(rng);
+            #else
+            m_value = 0.0f;
+            #endif
+        }
+
+        static float PF(float x)
+        {
+            return 1.0f;
+        }
+
+        float Generate(float generatorPFMultiplier)
+        {
+            m_attempts++;
+            m_value = fract(m_value + c_R2_a1);
+            return m_value;
+        }
+
+        size_t m_attempts = 0;
+        float m_value;
+    };
+
+    // PDF: y = 1
+    struct UniformLDS_R2_y
+    {
+        UniformLDS_R2_y()
+        {
+            #if RANDOMIZE_LDS_START()
+            std::mt19937 rng = GetRNG();
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            m_value = dist(rng);
+            #else
+            m_value = 0.0f;
+            #endif
+        }
+
+        static float PF(float x)
+        {
+            return 1.0f;
+        }
+
+        float Generate(float generatorPFMultiplier)
+        {
+            m_attempts++;
+            m_value = fract(m_value + c_R2_a2);
+            return m_value;
+        }
+
+        size_t m_attempts = 0;
+        float m_value;
+    };
+
+    // PDF: y = 1
+    struct UniformLDS_Sobol_x
+    {
+        UniformLDS_Sobol_x()
+        {
+            #if RANDOMIZE_LDS_START()
+            std::mt19937 rng = GetRNG();
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            m_rngOffset = dist(rng);
+            #else
+            m_rngOffset = 0.0f;
+            #endif
+        }
+
+        static float PF(float x)
+        {
+            return 1.0f;
+        }
+
+        float Generate(float generatorPFMultiplier)
+        {
+            if (m_index >= m_sobolPoints.size())
+                Sobol(m_sobolPoints, m_sobolPoints.size() + 1000);
+
+            m_attempts++;
+            float ret = m_sobolPoints[m_index][0];
+            m_index++;
+            return fract(ret + m_rngOffset);
+        }
+
+        size_t m_index = 0;
+        size_t m_attempts = 0;
+        std::vector<Vec2> m_sobolPoints;
+        float m_rngOffset;
+    };
+
+    // PDF: y = 1
+    struct UniformLDS_Sobol_y
+    {
+        UniformLDS_Sobol_y()
+        {
+            #if RANDOMIZE_LDS_START()
+            std::mt19937 rng = GetRNG();
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            m_rngOffset = dist(rng);
+            #else
+            m_rngOffset = 0.0f;
+            #endif
+        }
+
+        static float PF(float x)
+        {
+            return 1.0f;
+        }
+
+        float Generate(float generatorPFMultiplier)
+        {
+            if (m_index >= m_sobolPoints.size())
+                Sobol(m_sobolPoints, m_sobolPoints.size() + 1000);
+
+            m_attempts++;
+            float ret = m_sobolPoints[m_index][1];
+            m_index++;
+            return fract(ret + m_rngOffset);
+        }
+
+        size_t m_index = 0;
+        size_t m_attempts = 0;
+        std::vector<Vec2> m_sobolPoints;
+        float m_rngOffset;
+    };
+
 
     // PDF:  y = (2x + 3) / 4
     // CDF:  y = (x^2 + 3x) / 4 
@@ -380,28 +567,32 @@ int main(int argc, char ** argv)
             expectedHistogram.push_back(cdf1 - cdf0);
         }
 
-        std::vector<float> histogram[c_numReportValues][4];
-        std::vector<float> histogramAvg[c_numReportValues][4];
-        std::vector<float> histogramSqAvg[c_numReportValues][4];
+        std::vector<float> histogram[c_numReportValues][6];
+        std::vector<float> histogramAvg[c_numReportValues][6];
+        std::vector<float> histogramSqAvg[c_numReportValues][6];
 
-        std::vector<size_t> attempts[4];
-        std::vector<float> attemptsAvg[4];
-        std::vector<float> attemptsSqAvg[4];
+        std::vector<size_t> attempts[6];
+        std::vector<float> attemptsAvg[6];
+        std::vector<float> attemptsSqAvg[6];
 
         for (size_t testIndex = 0; testIndex < c_numTests; ++testIndex)
         {
             // generate the samples
-            std::vector<float> samples[4];
+            std::vector<float> samples[6];
             GenerateSequence<PDF::Linear<PDF::UniformWhite, PDF::UniformWhite>>(samples[0], c_maxReportValue, 1.0f, attempts[0]);
             GenerateSequence<PDF::Linear<PDF::UniformWhite, PDF::UniformLDS_GR>>(samples[1], c_maxReportValue, 1.0f, attempts[1]);
             GenerateSequence<PDF::Linear<PDF::UniformLDS_Root2, PDF::UniformWhite>>(samples[2], c_maxReportValue, 1.0f, attempts[2]);
             GenerateSequence<PDF::Linear<PDF::UniformLDS_Root2, PDF::UniformLDS_GR>>(samples[3], c_maxReportValue, 1.0f, attempts[3]);
+            GenerateSequence<PDF::Linear<PDF::UniformLDS_R2_x, PDF::UniformLDS_R2_y>>(samples[4], c_maxReportValue, 1.0f, attempts[4]);
+            GenerateSequence<PDF::Linear<PDF::UniformLDS_Sobol_x, PDF::UniformLDS_Sobol_y>>(samples[5], c_maxReportValue, 1.0f, attempts[5]);
 
             // combine the attempts data
             CombineAttemptsData(attempts[0], attemptsAvg[0], attemptsSqAvg[0], testIndex);
             CombineAttemptsData(attempts[1], attemptsAvg[1], attemptsSqAvg[1], testIndex);
             CombineAttemptsData(attempts[2], attemptsAvg[2], attemptsSqAvg[2], testIndex);
             CombineAttemptsData(attempts[3], attemptsAvg[3], attemptsSqAvg[3], testIndex);
+            CombineAttemptsData(attempts[4], attemptsAvg[4], attemptsSqAvg[4], testIndex);
+            CombineAttemptsData(attempts[5], attemptsAvg[5], attemptsSqAvg[5], testIndex);
 
             // calculate data for each report
             for (size_t reportIndex = 0; reportIndex < c_numReportValues; ++reportIndex)
@@ -413,12 +604,16 @@ int main(int argc, char ** argv)
                 CalculateHistogram(samples[1], sampleCount, histogram[reportIndex][1]);
                 CalculateHistogram(samples[2], sampleCount, histogram[reportIndex][2]);
                 CalculateHistogram(samples[3], sampleCount, histogram[reportIndex][3]);
+                CalculateHistogram(samples[4], sampleCount, histogram[reportIndex][4]);
+                CalculateHistogram(samples[5], sampleCount, histogram[reportIndex][5]);
 
                 // combine the histograms
                 HistogramCombine(histogram[reportIndex][0], histogramAvg[reportIndex][0], histogramSqAvg[reportIndex][0], testIndex);
                 HistogramCombine(histogram[reportIndex][1], histogramAvg[reportIndex][1], histogramSqAvg[reportIndex][1], testIndex);
                 HistogramCombine(histogram[reportIndex][2], histogramAvg[reportIndex][2], histogramSqAvg[reportIndex][2], testIndex);
                 HistogramCombine(histogram[reportIndex][3], histogramAvg[reportIndex][3], histogramSqAvg[reportIndex][3], testIndex);
+                HistogramCombine(histogram[reportIndex][4], histogramAvg[reportIndex][4], histogramSqAvg[reportIndex][4], testIndex);
+                HistogramCombine(histogram[reportIndex][5], histogramAvg[reportIndex][5], histogramSqAvg[reportIndex][5], testIndex);
             }
         }
 
@@ -430,18 +625,24 @@ int main(int argc, char ** argv)
             WriteSurvival(csv, "white/LDS", attempts[1], 100);
             WriteSurvival(csv, "LDS/white", attempts[2], 100);
             WriteSurvival(csv, "LDS/LDS", attempts[3], 100);
+            WriteSurvival(csv, "R2 LDS", attempts[4], 100);
+            WriteSurvival(csv, "Sobol LDS", attempts[5], 100);
 
             SetCSV(csv, GetCSVCols(csv), 0, "Survival Avg");
             WriteSurvival(csv, "white/white", attemptsAvg[0], 100);
             WriteSurvival(csv, "white/LDS", attemptsAvg[1], 100);
             WriteSurvival(csv, "LDS/white", attemptsAvg[2], 100);
             WriteSurvival(csv, "LDS/LDS", attemptsAvg[3], 100);
+            WriteSurvival(csv, "R2 LDS", attemptsAvg[4], 100);
+            WriteSurvival(csv, "Sobol LDS", attemptsAvg[5], 100);
 
             SetCSV(csv, GetCSVCols(csv), 0, "Survival Std Dev");
             WriteSurvivalStdDev(csv, "white/white", attemptsAvg[0], attemptsSqAvg[0], 100);
             WriteSurvivalStdDev(csv, "white/LDS", attemptsAvg[1], attemptsSqAvg[1], 100);
             WriteSurvivalStdDev(csv, "LDS/white", attemptsAvg[2], attemptsSqAvg[2], 100);
             WriteSurvivalStdDev(csv, "LDS/LDS", attemptsAvg[3], attemptsSqAvg[3], 100);
+            WriteSurvivalStdDev(csv, "R2 LDS", attemptsAvg[4], attemptsSqAvg[4], 100);
+            WriteSurvivalStdDev(csv, "Sobol LDS", attemptsAvg[5], attemptsSqAvg[5], 100);
 
             WriteCSV(csv, "out/uni_lin_survival.csv");
         }
@@ -468,6 +669,8 @@ int main(int argc, char ** argv)
             WriteHistogram(file, "white/LDS", histogram[reportIndex][1]);
             WriteHistogram(file, "LDS/white", histogram[reportIndex][2]);
             WriteHistogram(file, "LDS/LDS", histogram[reportIndex][3]);
+            WriteHistogram(file, "R2 LDS", histogram[reportIndex][4]);
+            WriteHistogram(file, "Sobol LDS", histogram[reportIndex][5]);
 
             // write error
             fprintf(file, "\n\"Error:\"\n");
@@ -475,6 +678,8 @@ int main(int argc, char ** argv)
             WriteHistogramError(file, "white/LDS", histogram[reportIndex][1], expectedHistogram);
             WriteHistogramError(file, "LDS/white", histogram[reportIndex][2], expectedHistogram);
             WriteHistogramError(file, "LDS/LDS", histogram[reportIndex][3], expectedHistogram);
+            WriteHistogramError(file, "R2 LDS", histogram[reportIndex][4], expectedHistogram);
+            WriteHistogramError(file, "Sobol LDS", histogram[reportIndex][5], expectedHistogram);
 
             // write average error
             fprintf(file, "\n\"Avg Error:\"\n");
@@ -482,6 +687,8 @@ int main(int argc, char ** argv)
             WriteHistogramError(file, "white/LDS", histogramAvg[reportIndex][1], expectedHistogram);
             WriteHistogramError(file, "LDS/white", histogramAvg[reportIndex][2], expectedHistogram);
             WriteHistogramError(file, "LDS/LDS", histogramAvg[reportIndex][3], expectedHistogram);
+            WriteHistogramError(file, "R2 LDS", histogramAvg[reportIndex][4], expectedHistogram);
+            WriteHistogramError(file, "Sobol LDS", histogramAvg[reportIndex][5], expectedHistogram);
 
             // write std dev
             fprintf(file, "\n\"Std Dev:\"\n");
@@ -489,6 +696,8 @@ int main(int argc, char ** argv)
             WriteHistogramStdDev(file, "white/LDS", histogramAvg[reportIndex][1], histogramSqAvg[reportIndex][1]);
             WriteHistogramStdDev(file, "LDS/white", histogramAvg[reportIndex][2], histogramSqAvg[reportIndex][2]);
             WriteHistogramStdDev(file, "LDS/LDS", histogramAvg[reportIndex][3], histogramSqAvg[reportIndex][3]);
+            WriteHistogramStdDev(file, "R2 LDS", histogramAvg[reportIndex][4], histogramSqAvg[reportIndex][4]);
+            WriteHistogramStdDev(file, "Sobol LDS", histogramAvg[reportIndex][5], histogramSqAvg[reportIndex][5]);
 
             fclose(file);
         }
@@ -509,28 +718,32 @@ int main(int argc, char ** argv)
             expectedHistogram.push_back(cdf1 - cdf0);
         }
 
-        std::vector<float> histogram[c_numReportValues][4];
-        std::vector<float> histogramAvg[c_numReportValues][4];
-        std::vector<float> histogramSqAvg[c_numReportValues][4];
+        std::vector<float> histogram[c_numReportValues][6];
+        std::vector<float> histogramAvg[c_numReportValues][6];
+        std::vector<float> histogramSqAvg[c_numReportValues][6];
 
-        std::vector<size_t> attempts[4];
-        std::vector<float> attemptsAvg[4];
-        std::vector<float> attemptsSqAvg[4];
+        std::vector<size_t> attempts[6];
+        std::vector<float> attemptsAvg[6];
+        std::vector<float> attemptsSqAvg[6];
 
         for (size_t testIndex = 0; testIndex < c_numTests; ++testIndex)
         {
             // generate the samples
-            std::vector<float> samples[4];
+            std::vector<float> samples[6];
             GenerateSequence<PDF::Cubic<PDF::Linear<PDF::UniformWhite, PDF::UniformWhite>, PDF::UniformWhite>>(samples[0], c_maxReportValue, 1.6f, attempts[0]);
             GenerateSequence<PDF::Cubic<PDF::Linear<PDF::UniformWhite, PDF::UniformLDS_GR>, PDF::UniformLDS_GR>>(samples[1], c_maxReportValue, 1.6f, attempts[1]);
             GenerateSequence<PDF::Cubic<PDF::Linear<PDF::UniformLDS_Root2, PDF::UniformWhite>, PDF::UniformWhite>>(samples[2], c_maxReportValue, 1.6f, attempts[2]);
             GenerateSequence<PDF::Cubic<PDF::Linear<PDF::UniformLDS_Root2, PDF::UniformLDS_GR>, PDF::UniformLDS_GR>>(samples[3], c_maxReportValue, 1.6f, attempts[3]);
+            GenerateSequence<PDF::Cubic<PDF::Linear<PDF::UniformLDS_R2_x, PDF::UniformLDS_R2_y>, PDF::UniformLDS_R2_y>>(samples[4], c_maxReportValue, 1.6f, attempts[4]);
+            GenerateSequence<PDF::Cubic<PDF::Linear<PDF::UniformLDS_Sobol_x, PDF::UniformLDS_Sobol_y>, PDF::UniformLDS_Sobol_y>>(samples[5], c_maxReportValue, 1.6f, attempts[5]);
 
             // combine the attempts data
             CombineAttemptsData(attempts[0], attemptsAvg[0], attemptsSqAvg[0], testIndex);
             CombineAttemptsData(attempts[1], attemptsAvg[1], attemptsSqAvg[1], testIndex);
             CombineAttemptsData(attempts[2], attemptsAvg[2], attemptsSqAvg[2], testIndex);
             CombineAttemptsData(attempts[3], attemptsAvg[3], attemptsSqAvg[3], testIndex);
+            CombineAttemptsData(attempts[4], attemptsAvg[4], attemptsSqAvg[4], testIndex);
+            CombineAttemptsData(attempts[5], attemptsAvg[5], attemptsSqAvg[5], testIndex);
 
             // calculate data for each report
             for (size_t reportIndex = 0; reportIndex < c_numReportValues; ++reportIndex)
@@ -542,12 +755,16 @@ int main(int argc, char ** argv)
                 CalculateHistogram(samples[1], sampleCount, histogram[reportIndex][1]);
                 CalculateHistogram(samples[2], sampleCount, histogram[reportIndex][2]);
                 CalculateHistogram(samples[3], sampleCount, histogram[reportIndex][3]);
+                CalculateHistogram(samples[4], sampleCount, histogram[reportIndex][4]);
+                CalculateHistogram(samples[5], sampleCount, histogram[reportIndex][5]);
 
                 // combine the histograms
                 HistogramCombine(histogram[reportIndex][0], histogramAvg[reportIndex][0], histogramSqAvg[reportIndex][0], testIndex);
                 HistogramCombine(histogram[reportIndex][1], histogramAvg[reportIndex][1], histogramSqAvg[reportIndex][1], testIndex);
                 HistogramCombine(histogram[reportIndex][2], histogramAvg[reportIndex][2], histogramSqAvg[reportIndex][2], testIndex);
                 HistogramCombine(histogram[reportIndex][3], histogramAvg[reportIndex][3], histogramSqAvg[reportIndex][3], testIndex);
+                HistogramCombine(histogram[reportIndex][4], histogramAvg[reportIndex][4], histogramSqAvg[reportIndex][4], testIndex);
+                HistogramCombine(histogram[reportIndex][5], histogramAvg[reportIndex][5], histogramSqAvg[reportIndex][5], testIndex);
             }
         }
 
@@ -559,18 +776,24 @@ int main(int argc, char ** argv)
             WriteSurvival(csv, "white/LDS", attempts[1], 100);
             WriteSurvival(csv, "LDS/white", attempts[2], 100);
             WriteSurvival(csv, "LDS/LDS", attempts[3], 100);
+            WriteSurvival(csv, "R2 LDS", attempts[4], 100);
+            WriteSurvival(csv, "Sobol LDS", attempts[5], 100);
 
             SetCSV(csv, GetCSVCols(csv), 0, "Survival Avg");
             WriteSurvival(csv, "white/white", attemptsAvg[0], 100);
             WriteSurvival(csv, "white/LDS", attemptsAvg[1], 100);
             WriteSurvival(csv, "LDS/white", attemptsAvg[2], 100);
             WriteSurvival(csv, "LDS/LDS", attemptsAvg[3], 100);
+            WriteSurvival(csv, "R2 LDS", attemptsAvg[4], 100);
+            WriteSurvival(csv, "Sobol LDS", attemptsAvg[5], 100);
 
             SetCSV(csv, GetCSVCols(csv), 0, "Survival Std Dev");
             WriteSurvivalStdDev(csv, "white/white", attemptsAvg[0], attemptsSqAvg[0], 100);
             WriteSurvivalStdDev(csv, "white/LDS", attemptsAvg[1], attemptsSqAvg[1], 100);
             WriteSurvivalStdDev(csv, "LDS/white", attemptsAvg[2], attemptsSqAvg[2], 100);
             WriteSurvivalStdDev(csv, "LDS/LDS", attemptsAvg[3], attemptsSqAvg[3], 100);
+            WriteSurvivalStdDev(csv, "R2 LDS", attemptsAvg[4], attemptsSqAvg[4], 100);
+            WriteSurvivalStdDev(csv, "Sobol LDS", attemptsAvg[5], attemptsSqAvg[5], 100);
 
             WriteCSV(csv, "out/lin_cub_survival.csv");
         }
@@ -597,6 +820,8 @@ int main(int argc, char ** argv)
             WriteHistogram(file, "white/LDS", histogram[reportIndex][1]);
             WriteHistogram(file, "LDS/white", histogram[reportIndex][2]);
             WriteHistogram(file, "LDS/LDS", histogram[reportIndex][3]);
+            WriteHistogram(file, "R2 LDS", histogram[reportIndex][4]);
+            WriteHistogram(file, "Sobol LDS", histogram[reportIndex][5]);
 
             // write error
             fprintf(file, "\n\"Error:\"\n");
@@ -604,6 +829,8 @@ int main(int argc, char ** argv)
             WriteHistogramError(file, "white/LDS", histogram[reportIndex][1], expectedHistogram);
             WriteHistogramError(file, "LDS/white", histogram[reportIndex][2], expectedHistogram);
             WriteHistogramError(file, "LDS/LDS", histogram[reportIndex][3], expectedHistogram);
+            WriteHistogramError(file, "R2 LDS", histogram[reportIndex][4], expectedHistogram);
+            WriteHistogramError(file, "Sobol LDS", histogram[reportIndex][5], expectedHistogram);
 
             // write average error
             fprintf(file, "\n\"Avg Error:\"\n");
@@ -611,6 +838,8 @@ int main(int argc, char ** argv)
             WriteHistogramError(file, "white/LDS", histogramAvg[reportIndex][1], expectedHistogram);
             WriteHistogramError(file, "LDS/white", histogramAvg[reportIndex][2], expectedHistogram);
             WriteHistogramError(file, "LDS/LDS", histogramAvg[reportIndex][3], expectedHistogram);
+            WriteHistogramError(file, "R2 LDS", histogramAvg[reportIndex][4], expectedHistogram);
+            WriteHistogramError(file, "Sobol LDS", histogramAvg[reportIndex][5], expectedHistogram);
 
             // write std dev
             fprintf(file, "\n\"Std Dev:\"\n");
@@ -618,6 +847,8 @@ int main(int argc, char ** argv)
             WriteHistogramStdDev(file, "white/LDS", histogramAvg[reportIndex][1], histogramSqAvg[reportIndex][1]);
             WriteHistogramStdDev(file, "LDS/white", histogramAvg[reportIndex][2], histogramSqAvg[reportIndex][2]);
             WriteHistogramStdDev(file, "LDS/LDS", histogramAvg[reportIndex][3], histogramSqAvg[reportIndex][3]);
+            WriteHistogramStdDev(file, "R2 LDS", histogramAvg[reportIndex][4], histogramSqAvg[reportIndex][4]);
+            WriteHistogramStdDev(file, "Sobol LDS", histogramAvg[reportIndex][5], histogramSqAvg[reportIndex][5]);
 
             fclose(file);
         }
@@ -638,28 +869,32 @@ int main(int argc, char ** argv)
             expectedHistogram.push_back(cdf1 - cdf0);
         }
 
-        std::vector<float> histogram[c_numReportValues][4];
-        std::vector<float> histogramAvg[c_numReportValues][4];
-        std::vector<float> histogramSqAvg[c_numReportValues][4];
+        std::vector<float> histogram[c_numReportValues][6];
+        std::vector<float> histogramAvg[c_numReportValues][6];
+        std::vector<float> histogramSqAvg[c_numReportValues][6];
 
-        std::vector<size_t> attempts[4];
-        std::vector<float> attemptsAvg[4];
-        std::vector<float> attemptsSqAvg[4];
+        std::vector<size_t> attempts[6];
+        std::vector<float> attemptsAvg[6];
+        std::vector<float> attemptsSqAvg[6];
 
         for (size_t testIndex = 0; testIndex < c_numTests; ++testIndex)
         {
             // generate the samples
-            std::vector<float> samples[4];
+            std::vector<float> samples[6];
             GenerateSequence<PDF::Cubic<PDF::UniformWhite, PDF::UniformWhite>>(samples[0], c_maxReportValue, 1.0f, attempts[0]);
             GenerateSequence<PDF::Cubic<PDF::UniformWhite, PDF::UniformLDS_GR>>(samples[1], c_maxReportValue, 1.0f, attempts[1]);
             GenerateSequence<PDF::Cubic<PDF::UniformLDS_Root2, PDF::UniformWhite>>(samples[2], c_maxReportValue, 1.0f, attempts[2]);
             GenerateSequence<PDF::Cubic<PDF::UniformLDS_Root2, PDF::UniformLDS_GR>>(samples[3], c_maxReportValue, 1.0f, attempts[3]);
+            GenerateSequence<PDF::Cubic<PDF::UniformLDS_R2_x, PDF::UniformLDS_R2_y>>(samples[4], c_maxReportValue, 1.0f, attempts[4]);
+            GenerateSequence<PDF::Cubic<PDF::UniformLDS_Sobol_x, PDF::UniformLDS_Sobol_y>>(samples[5], c_maxReportValue, 1.0f, attempts[5]);
 
             // combine the attempts data
             CombineAttemptsData(attempts[0], attemptsAvg[0], attemptsSqAvg[0], testIndex);
             CombineAttemptsData(attempts[1], attemptsAvg[1], attemptsSqAvg[1], testIndex);
             CombineAttemptsData(attempts[2], attemptsAvg[2], attemptsSqAvg[2], testIndex);
             CombineAttemptsData(attempts[3], attemptsAvg[3], attemptsSqAvg[3], testIndex);
+            CombineAttemptsData(attempts[4], attemptsAvg[4], attemptsSqAvg[4], testIndex);
+            CombineAttemptsData(attempts[5], attemptsAvg[5], attemptsSqAvg[5], testIndex);
 
             // calculate data for each report
             for (size_t reportIndex = 0; reportIndex < c_numReportValues; ++reportIndex)
@@ -671,12 +906,16 @@ int main(int argc, char ** argv)
                 CalculateHistogram(samples[1], sampleCount, histogram[reportIndex][1]);
                 CalculateHistogram(samples[2], sampleCount, histogram[reportIndex][2]);
                 CalculateHistogram(samples[3], sampleCount, histogram[reportIndex][3]);
+                CalculateHistogram(samples[4], sampleCount, histogram[reportIndex][4]);
+                CalculateHistogram(samples[5], sampleCount, histogram[reportIndex][5]);
 
                 // combine the histograms
                 HistogramCombine(histogram[reportIndex][0], histogramAvg[reportIndex][0], histogramSqAvg[reportIndex][0], testIndex);
                 HistogramCombine(histogram[reportIndex][1], histogramAvg[reportIndex][1], histogramSqAvg[reportIndex][1], testIndex);
                 HistogramCombine(histogram[reportIndex][2], histogramAvg[reportIndex][2], histogramSqAvg[reportIndex][2], testIndex);
                 HistogramCombine(histogram[reportIndex][3], histogramAvg[reportIndex][3], histogramSqAvg[reportIndex][3], testIndex);
+                HistogramCombine(histogram[reportIndex][4], histogramAvg[reportIndex][4], histogramSqAvg[reportIndex][4], testIndex);
+                HistogramCombine(histogram[reportIndex][5], histogramAvg[reportIndex][5], histogramSqAvg[reportIndex][5], testIndex);
             }
         }
 
@@ -688,18 +927,24 @@ int main(int argc, char ** argv)
             WriteSurvival(csv, "white/LDS", attempts[1], 100);
             WriteSurvival(csv, "LDS/white", attempts[2], 100);
             WriteSurvival(csv, "LDS/LDS", attempts[3], 100);
+            WriteSurvival(csv, "R2 LDS", attempts[4], 100);
+            WriteSurvival(csv, "Sobol LDS", attempts[5], 100);
 
             SetCSV(csv, GetCSVCols(csv), 0, "Survival Avg");
             WriteSurvival(csv, "white/white", attemptsAvg[0], 100);
             WriteSurvival(csv, "white/LDS", attemptsAvg[1], 100);
             WriteSurvival(csv, "LDS/white", attemptsAvg[2], 100);
             WriteSurvival(csv, "LDS/LDS", attemptsAvg[3], 100);
+            WriteSurvival(csv, "R2 LDS", attemptsAvg[4], 100);
+            WriteSurvival(csv, "Sobol LDS", attemptsAvg[5], 100);
 
             SetCSV(csv, GetCSVCols(csv), 0, "Survival Std Dev");
             WriteSurvivalStdDev(csv, "white/white", attemptsAvg[0], attemptsSqAvg[0], 100);
             WriteSurvivalStdDev(csv, "white/LDS", attemptsAvg[1], attemptsSqAvg[1], 100);
             WriteSurvivalStdDev(csv, "LDS/white", attemptsAvg[2], attemptsSqAvg[2], 100);
             WriteSurvivalStdDev(csv, "LDS/LDS", attemptsAvg[3], attemptsSqAvg[3], 100);
+            WriteSurvivalStdDev(csv, "R2 LDS", attemptsAvg[4], attemptsSqAvg[4], 100);
+            WriteSurvivalStdDev(csv, "Sobol LDS", attemptsAvg[5], attemptsSqAvg[5], 100);
 
             WriteCSV(csv, "out/uni_cub_survival.csv");
         }
@@ -726,6 +971,8 @@ int main(int argc, char ** argv)
             WriteHistogram(file, "white/LDS", histogram[reportIndex][1]);
             WriteHistogram(file, "LDS/white", histogram[reportIndex][2]);
             WriteHistogram(file, "LDS/LDS", histogram[reportIndex][3]);
+            WriteHistogram(file, "R2 LDS", histogram[reportIndex][4]);
+            WriteHistogram(file, "Sobol LDS", histogram[reportIndex][5]);
 
             // write error
             fprintf(file, "\n\"Error:\"\n");
@@ -733,6 +980,8 @@ int main(int argc, char ** argv)
             WriteHistogramError(file, "white/LDS", histogram[reportIndex][1], expectedHistogram);
             WriteHistogramError(file, "LDS/white", histogram[reportIndex][2], expectedHistogram);
             WriteHistogramError(file, "LDS/LDS", histogram[reportIndex][3], expectedHistogram);
+            WriteHistogramError(file, "R2 LDS", histogram[reportIndex][4], expectedHistogram);
+            WriteHistogramError(file, "Sobol LDS", histogram[reportIndex][5], expectedHistogram);
 
             // write average error
             fprintf(file, "\n\"Avg Error:\"\n");
@@ -740,6 +989,8 @@ int main(int argc, char ** argv)
             WriteHistogramError(file, "white/LDS", histogramAvg[reportIndex][1], expectedHistogram);
             WriteHistogramError(file, "LDS/white", histogramAvg[reportIndex][2], expectedHistogram);
             WriteHistogramError(file, "LDS/LDS", histogramAvg[reportIndex][3], expectedHistogram);
+            WriteHistogramError(file, "R2 LDS", histogramAvg[reportIndex][4], expectedHistogram);
+            WriteHistogramError(file, "Sobol LDS", histogramAvg[reportIndex][5], expectedHistogram);
 
             // write std dev
             fprintf(file, "\n\"Std Dev:\"\n");
@@ -747,6 +998,8 @@ int main(int argc, char ** argv)
             WriteHistogramStdDev(file, "white/LDS", histogramAvg[reportIndex][1], histogramSqAvg[reportIndex][1]);
             WriteHistogramStdDev(file, "LDS/white", histogramAvg[reportIndex][2], histogramSqAvg[reportIndex][2]);
             WriteHistogramStdDev(file, "LDS/LDS", histogramAvg[reportIndex][3], histogramSqAvg[reportIndex][3]);
+            WriteHistogramStdDev(file, "R2 LDS", histogramAvg[reportIndex][4], histogramSqAvg[reportIndex][4]);
+            WriteHistogramStdDev(file, "Sobol LDS", histogramAvg[reportIndex][5], histogramSqAvg[reportIndex][5]);
 
             fclose(file);
         }
@@ -767,28 +1020,32 @@ int main(int argc, char ** argv)
             expectedHistogram.push_back(cdf1 - cdf0);
         }
 
-        std::vector<float> histogram[c_numReportValues][4];
-        std::vector<float> histogramAvg[c_numReportValues][4];
-        std::vector<float> histogramSqAvg[c_numReportValues][4];
+        std::vector<float> histogram[c_numReportValues][6];
+        std::vector<float> histogramAvg[c_numReportValues][6];
+        std::vector<float> histogramSqAvg[c_numReportValues][6];
 
-        std::vector<size_t> attempts[4];
-        std::vector<float> attemptsAvg[4];
-        std::vector<float> attemptsSqAvg[4];
+        std::vector<size_t> attempts[6];
+        std::vector<float> attemptsAvg[6];
+        std::vector<float> attemptsSqAvg[6];
 
         for (size_t testIndex = 0; testIndex < c_numTests; ++testIndex)
         {
             // generate the samples
-            std::vector<float> samples[4];
+            std::vector<float> samples[6];
             GenerateSequence<PDF::Cubic<PDF::UniformWhite, PDF::UniformWhite>>(samples[0], c_maxReportValue, 1.0f, attempts[0]);
             GenerateSequence<PDF::Cubic<PDF::UniformWhite, PDF::UniformLDS_Root2>>(samples[1], c_maxReportValue, 1.0f, attempts[1]);
             GenerateSequence<PDF::Cubic<PDF::UniformLDS_GR, PDF::UniformWhite>>(samples[2], c_maxReportValue, 1.0f, attempts[2]);
             GenerateSequence<PDF::Cubic<PDF::UniformLDS_GR, PDF::UniformLDS_Root2>>(samples[3], c_maxReportValue, 1.0f, attempts[3]);
+            GenerateSequence<PDF::Cubic<PDF::UniformLDS_R2_x, PDF::UniformLDS_R2_y>>(samples[4], c_maxReportValue, 1.0f, attempts[4]);
+            GenerateSequence<PDF::Cubic<PDF::UniformLDS_Sobol_x, PDF::UniformLDS_Sobol_y>>(samples[5], c_maxReportValue, 1.0f, attempts[5]);
 
             // combine the attempts data
             CombineAttemptsData(attempts[0], attemptsAvg[0], attemptsSqAvg[0], testIndex);
             CombineAttemptsData(attempts[1], attemptsAvg[1], attemptsSqAvg[1], testIndex);
             CombineAttemptsData(attempts[2], attemptsAvg[2], attemptsSqAvg[2], testIndex);
             CombineAttemptsData(attempts[3], attemptsAvg[3], attemptsSqAvg[3], testIndex);
+            CombineAttemptsData(attempts[4], attemptsAvg[4], attemptsSqAvg[4], testIndex);
+            CombineAttemptsData(attempts[5], attemptsAvg[5], attemptsSqAvg[5], testIndex);
 
             // calculate data for each report
             for (size_t reportIndex = 0; reportIndex < c_numReportValues; ++reportIndex)
@@ -800,12 +1057,16 @@ int main(int argc, char ** argv)
                 CalculateHistogram(samples[1], sampleCount, histogram[reportIndex][1]);
                 CalculateHistogram(samples[2], sampleCount, histogram[reportIndex][2]);
                 CalculateHistogram(samples[3], sampleCount, histogram[reportIndex][3]);
+                CalculateHistogram(samples[4], sampleCount, histogram[reportIndex][4]);
+                CalculateHistogram(samples[5], sampleCount, histogram[reportIndex][5]);
 
                 // combine the histograms
                 HistogramCombine(histogram[reportIndex][0], histogramAvg[reportIndex][0], histogramSqAvg[reportIndex][0], testIndex);
                 HistogramCombine(histogram[reportIndex][1], histogramAvg[reportIndex][1], histogramSqAvg[reportIndex][1], testIndex);
                 HistogramCombine(histogram[reportIndex][2], histogramAvg[reportIndex][2], histogramSqAvg[reportIndex][2], testIndex);
                 HistogramCombine(histogram[reportIndex][3], histogramAvg[reportIndex][3], histogramSqAvg[reportIndex][3], testIndex);
+                HistogramCombine(histogram[reportIndex][4], histogramAvg[reportIndex][4], histogramSqAvg[reportIndex][4], testIndex);
+                HistogramCombine(histogram[reportIndex][5], histogramAvg[reportIndex][5], histogramSqAvg[reportIndex][5], testIndex);
             }
         }
 
@@ -817,18 +1078,24 @@ int main(int argc, char ** argv)
             WriteSurvival(csv, "white/LDS", attempts[1], 100);
             WriteSurvival(csv, "LDS/white", attempts[2], 100);
             WriteSurvival(csv, "LDS/LDS", attempts[3], 100);
+            WriteSurvival(csv, "R2 LDS", attempts[4], 100);
+            WriteSurvival(csv, "Sobol LDS", attempts[5], 100);
 
             SetCSV(csv, GetCSVCols(csv), 0, "Survival Avg");
             WriteSurvival(csv, "white/white", attemptsAvg[0], 100);
             WriteSurvival(csv, "white/LDS", attemptsAvg[1], 100);
             WriteSurvival(csv, "LDS/white", attemptsAvg[2], 100);
             WriteSurvival(csv, "LDS/LDS", attemptsAvg[3], 100);
+            WriteSurvival(csv, "R2 LDS", attemptsAvg[4], 100);
+            WriteSurvival(csv, "Sobol LDS", attemptsAvg[5], 100);
 
             SetCSV(csv, GetCSVCols(csv), 0, "Survival Std Dev");
             WriteSurvivalStdDev(csv, "white/white", attemptsAvg[0], attemptsSqAvg[0], 100);
             WriteSurvivalStdDev(csv, "white/LDS", attemptsAvg[1], attemptsSqAvg[1], 100);
             WriteSurvivalStdDev(csv, "LDS/white", attemptsAvg[2], attemptsSqAvg[2], 100);
             WriteSurvivalStdDev(csv, "LDS/LDS", attemptsAvg[3], attemptsSqAvg[3], 100);
+            WriteSurvivalStdDev(csv, "R2 LDS", attemptsAvg[4], attemptsSqAvg[4], 100);
+            WriteSurvivalStdDev(csv, "Sobol LDS", attemptsAvg[5], attemptsSqAvg[5], 100);
 
             WriteCSV(csv, "out/uni_cub_2_survival.csv");
         }
@@ -855,6 +1122,8 @@ int main(int argc, char ** argv)
             WriteHistogram(file, "white/LDS", histogram[reportIndex][1]);
             WriteHistogram(file, "LDS/white", histogram[reportIndex][2]);
             WriteHistogram(file, "LDS/LDS", histogram[reportIndex][3]);
+            WriteHistogram(file, "R2 LDS", histogram[reportIndex][4]);
+            WriteHistogram(file, "Sobol LDS", histogram[reportIndex][5]);
 
             // write error
             fprintf(file, "\n\"Error:\"\n");
@@ -862,6 +1131,8 @@ int main(int argc, char ** argv)
             WriteHistogramError(file, "white/LDS", histogram[reportIndex][1], expectedHistogram);
             WriteHistogramError(file, "LDS/white", histogram[reportIndex][2], expectedHistogram);
             WriteHistogramError(file, "LDS/LDS", histogram[reportIndex][3], expectedHistogram);
+            WriteHistogramError(file, "R2 LDS", histogram[reportIndex][4], expectedHistogram);
+            WriteHistogramError(file, "Sobol LDS", histogram[reportIndex][5], expectedHistogram);
 
             // write average error
             fprintf(file, "\n\"Avg Error:\"\n");
@@ -869,6 +1140,8 @@ int main(int argc, char ** argv)
             WriteHistogramError(file, "white/LDS", histogramAvg[reportIndex][1], expectedHistogram);
             WriteHistogramError(file, "LDS/white", histogramAvg[reportIndex][2], expectedHistogram);
             WriteHistogramError(file, "LDS/LDS", histogramAvg[reportIndex][3], expectedHistogram);
+            WriteHistogramError(file, "R2 LDS", histogramAvg[reportIndex][4], expectedHistogram);
+            WriteHistogramError(file, "Sobol LDS", histogramAvg[reportIndex][5], expectedHistogram);
 
             // write std dev
             fprintf(file, "\n\"Std Dev:\"\n");
@@ -876,6 +1149,8 @@ int main(int argc, char ** argv)
             WriteHistogramStdDev(file, "white/LDS", histogramAvg[reportIndex][1], histogramSqAvg[reportIndex][1]);
             WriteHistogramStdDev(file, "LDS/white", histogramAvg[reportIndex][2], histogramSqAvg[reportIndex][2]);
             WriteHistogramStdDev(file, "LDS/LDS", histogramAvg[reportIndex][3], histogramSqAvg[reportIndex][3]);
+            WriteHistogramStdDev(file, "R2 LDS", histogramAvg[reportIndex][4], histogramSqAvg[reportIndex][4]);
+            WriteHistogramStdDev(file, "Sobol LDS", histogramAvg[reportIndex][5], histogramSqAvg[reportIndex][5]);
 
             fclose(file);
         }
